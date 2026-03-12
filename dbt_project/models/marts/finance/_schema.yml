@@ -1,0 +1,132 @@
+# =============================================================================
+# models/marts/finance/_schema.yml
+#
+# PURPOSE: Documentation + data quality tests for all finance mart models.
+# This file is what dbt docs uses to build the data catalog.
+# Interviewers LOVE seeing well-documented dbt projects.
+# =============================================================================
+
+version: 2
+
+models:
+
+  # ── fct_mrr ────────────────────────────────────────────────────────────────
+  - name: fct_mrr
+    description: |
+      Monthly Recurring Revenue fact table. One row per subscription per month.
+      This is the source of truth for all revenue reporting at the company.
+      Powers the Executive MRR dashboard, Finance reconciliation, and board reporting.
+
+      **Important**: MRR is normalized — annual subscriptions are divided by 12
+      to give a true monthly view. Use `arr` column for annualized figures.
+
+      **Lineage**: stg_stripe__subscriptions → int_subscription_periods → fct_mrr
+
+    columns:
+      - name: mrr_id
+        description: "Surrogate key — unique identifier for each subscription-month combination"
+        tests:
+          - unique
+          - not_null
+
+      - name: month_start
+        description: "First day of the calendar month this MRR row represents"
+        tests:
+          - not_null
+
+      - name: subscription_id
+        description: "Stripe subscription ID"
+        tests:
+          - not_null
+
+      - name: customer_id
+        description: "Stripe customer ID — foreign key to dim_accounts.stripe_customer_id"
+        tests:
+          - not_null
+
+      - name: mrr
+        description: "Monthly Recurring Revenue in USD for this subscription in this month"
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 1000000  # sanity check — flag if MRR > $1M for single sub
+
+      - name: mrr_type
+        description: |
+          MRR movement classification:
+          - new: First month of subscription
+          - expansion: MRR increased vs prior month (upgrade)
+          - contraction: MRR decreased vs prior month (downgrade)
+          - churn: Subscription ended (MRR = 0)
+          - reactivation: Subscription restarted after churn
+          - retained: No change in MRR
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['new', 'expansion', 'contraction', 'churn', 'reactivation', 'retained']
+
+      - name: account_segment
+        description: "Customer segment: SMB, Mid-Market, Enterprise, Strategic"
+        tests:
+          - accepted_values:
+              values: ['SMB', 'Mid-Market', 'Enterprise', 'Strategic']
+              # Null allowed — some subscriptions may not have a Salesforce account yet
+              config:
+                where: "account_segment is not null"
+
+      - name: arr
+        description: "Annualized Run Rate — MRR × 12"
+        tests:
+          - not_null
+
+  # ── dim_accounts ───────────────────────────────────────────────────────────
+  - name: dim_accounts
+    description: |
+      Account dimension table. One row per customer company.
+      Combines Salesforce CRM data with app usage data.
+      Used as the central lookup for all customer attributes across fact tables.
+
+    columns:
+      - name: account_id
+        description: "Salesforce Account ID — primary key"
+        tests:
+          - unique
+          - not_null
+
+      - name: stripe_customer_id
+        description: "Stripe Customer ID — used to join with fct_mrr"
+        tests:
+          - unique  # One Stripe customer per account
+
+      - name: account_name
+        tests:
+          - not_null
+
+      - name: account_segment
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['SMB', 'Mid-Market', 'Enterprise', 'Strategic']
+
+  # ── rpt_monthly_revenue ────────────────────────────────────────────────────
+  - name: rpt_monthly_revenue
+    description: |
+      Pre-aggregated monthly revenue summary by segment.
+      Built for Finance team reporting and Executive dashboards.
+      Includes MRR waterfall components, customer counts, and MoM growth.
+
+    columns:
+      - name: month_start
+        tests: [not_null]
+
+      - name: account_segment
+        tests: [not_null]
+
+      - name: total_mrr
+        description: "Sum of all active MRR for this segment in this month"
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 100000000

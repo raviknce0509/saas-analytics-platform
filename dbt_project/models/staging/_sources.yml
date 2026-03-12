@@ -1,0 +1,146 @@
+# ─────────────────────────────────────────────────────────────────────
+# models/staging/_sources.yml
+#
+# Declares ALL raw source tables that land in Snowflake via Fivetran
+# or Python ingestion scripts. This is the CONTRACT between raw data
+# and your dbt models.
+#
+# Key concepts:
+#   source()  — references a raw table (not managed by dbt)
+#   ref()     — references a dbt model
+#   freshness — SLA: alert if data is older than X hours
+# ─────────────────────────────────────────────────────────────────────
+
+version: 2
+
+sources:
+
+  # ── STRIPE (via Fivetran) ──────────────────────────────────────────
+  - name: stripe
+    description: "Billing and subscription data loaded via Fivetran Stripe connector"
+    database: ANALYTICS_DEV          # Change to ANALYTICS_PROD in prod
+    schema: STRIPE_RAW
+    loaded_at_field: _fivetran_synced # Fivetran standard freshness field
+    freshness:
+      warn_after: {count: 6, period: hour}
+      error_after: {count: 24, period: hour}
+
+    tables:
+      - name: subscriptions
+        description: "All Stripe subscriptions — one row per subscription lifecycle"
+        columns:
+          - name: id
+            description: "Stripe subscription ID (sub_xxx)"
+            tests:
+              - unique
+              - not_null
+          - name: customer
+            tests: [not_null]
+          - name: status
+            tests:
+              - accepted_values:
+                  values: ['active', 'canceled', 'incomplete', 'incomplete_expired',
+                           'past_due', 'trialing', 'unpaid']
+
+      - name: invoices
+        description: "All Stripe invoices — one row per billing period"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+          - name: subscription
+            tests: [not_null]
+          - name: amount_due
+            tests: [not_null]
+
+      - name: customers
+        description: "Stripe customer records — maps to accounts in Salesforce"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+
+      - name: charges
+        description: "Individual charge attempts (successful and failed)"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+
+  # ── SALESFORCE (via Fivetran) ──────────────────────────────────────
+  - name: salesforce
+    description: "CRM data — accounts, contacts, opportunities loaded via Fivetran"
+    database: ANALYTICS_DEV
+    schema: SALESFORCE_RAW
+    loaded_at_field: _fivetran_synced
+    freshness:
+      warn_after: {count: 8, period: hour}
+      error_after: {count: 48, period: hour}
+
+    tables:
+      - name: account
+        description: "Salesforce Account object — one row per customer company"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+          - name: name
+            tests: [not_null]
+
+      - name: opportunity
+        description: "Sales pipeline opportunities"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+          - name: stage_name
+            tests:
+              - accepted_values:
+                  values: ['Prospecting', 'Qualification', 'Needs Analysis',
+                           'Value Proposition', 'Closed Won', 'Closed Lost']
+
+      - name: contact
+        description: "Individual contacts at customer accounts"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+
+  # ── APP DATABASE (via Python ingestion scripts) ────────────────────
+  - name: app_db
+    description: "Production app database — users, events, feature usage. Loaded via custom Python ETL"
+    database: ANALYTICS_DEV
+    schema: APP_RAW
+    loaded_at_field: _loaded_at       # Custom field added by our ingestion scripts
+    freshness:
+      warn_after: {count: 2, period: hour}
+      error_after: {count: 6, period: hour}
+
+    tables:
+      - name: users
+        description: "All registered users — one row per user account"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+          - name: email
+            tests: [unique, not_null]
+          - name: created_at
+            tests: [not_null]
+
+      - name: subscriptions
+        description: "App-level subscription metadata (mirrors Stripe but with app context)"
+        columns:
+          - name: id
+            tests: [unique, not_null]
+
+      - name: events
+        description: "Product events — page views, feature clicks, actions. High volume table"
+        columns:
+          - name: event_id
+            tests: [unique, not_null]
+          - name: user_id
+            tests: [not_null]
+          - name: event_name
+            tests: [not_null]
+          - name: occurred_at
+            tests: [not_null]
+
+      - name: sessions
+        description: "User sessions aggregated from raw events"
+        columns:
+          - name: session_id
+            tests: [unique, not_null]

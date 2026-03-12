@@ -1,0 +1,146 @@
+# =============================================================================
+# .github/workflows/dbt_ci.yml
+#
+# PURPOSE: Run dbt tests on every Pull Request.
+#   - Prevents broken SQL from merging to main
+#   - Tests run against a dev Snowflake schema (not prod)
+#   - Generates and uploads dbt docs as artifact
+#
+# TRIGGER: Every PR targeting main branch
+# =============================================================================
+
+name: dbt CI — Test & Validate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "dbt_project/**"   # Only run when dbt files change
+      - ".github/workflows/dbt_ci.yml"
+
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+
+jobs:
+  dbt-test:
+    name: Run dbt Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # Snowflake credentials from GitHub Secrets
+      # Set these in: GitHub repo → Settings → Secrets and variables → Actions
+      SNOWFLAKE_ACCOUNT:   ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER:      ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD:  ${{ secrets.SNOWFLAKE_PASSWORD }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE:  ANALYTICS_DEV
+      # Use a PR-specific schema so each PR is isolated
+      SNOWFLAKE_SCHEMA:    "dbt_ci_pr_${{ github.event.number }}"
+      DBT_TARGET:          dev
+
+    steps:
+      # ── 1. Checkout code ────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Install dbt + Snowflake adapter ──────────────────────────────────
+      - name: Install dbt
+        run: |
+          pip install \
+            dbt-core==1.8.0 \
+            dbt-snowflake==1.8.0
+
+      # ── 4. Configure dbt profiles.yml ───────────────────────────────────────
+      # Write the profiles.yml dynamically using env vars (never commit credentials)
+      - name: Configure dbt profile
+        run: |
+          mkdir -p ~/.dbt
+          cat > ~/.dbt/profiles.yml << EOF
+          saas_analytics:
+            target: dev
+            outputs:
+              dev:
+                type: snowflake
+                account: "$SNOWFLAKE_ACCOUNT"
+                user: "$SNOWFLAKE_USER"
+                password: "$SNOWFLAKE_PASSWORD"
+                role: TRANSFORMER
+                warehouse: "$SNOWFLAKE_WAREHOUSE"
+                database: "$SNOWFLAKE_DATABASE"
+                schema: "$SNOWFLAKE_SCHEMA"
+                threads: 4
+          EOF
+
+      # ── 5. Install dbt packages ──────────────────────────────────────────────
+      - name: Install dbt packages
+        working-directory: dbt_project
+        run: dbt deps
+
+      # ── 6. Compile (catch SQL syntax errors fast, before running) ───────────
+      - name: dbt compile
+        working-directory: dbt_project
+        run: dbt compile --target dev
+
+      # ── 7. Run staging models ────────────────────────────────────────────────
+      # Use --defer flag to only run changed models + their downstream dependencies
+      # This makes CI MUCH faster on large projects
+      - name: dbt run — staging
+        working-directory: dbt_project
+        run: dbt run --select staging --target dev
+
+      # ── 8. Run all downstream models ─────────────────────────────────────────
+      - name: dbt run — all models
+        working-directory: dbt_project
+        run: dbt run --target dev
+
+      # ── 9. Run tests (THE GATE) ───────────────────────────────────────────────
+      - name: dbt test
+        working-directory: dbt_project
+        run: dbt test --target dev --store-failures
+
+      # ── 10. Source freshness ─────────────────────────────────────────────────
+      - name: dbt source freshness
+        working-directory: dbt_project
+        run: dbt source freshness --target dev
+        # Don't fail CI on stale sources — just warn
+        continue-on-error: true
+
+      # ── 11. Generate docs ────────────────────────────────────────────────────
+      - name: dbt docs generate
+        working-directory: dbt_project
+        run: dbt docs generate --target dev
+
+      # ── 12. Upload docs as artifact (viewable in GitHub Actions) ────────────
+      - name: Upload dbt docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-docs-pr-${{ github.event.number }}
+          path: dbt_project/target/
+          retention-days: 7
+
+      # ── 13. Cleanup CI schema ────────────────────────────────────────────────
+      # Drop the PR-specific schema after tests complete
+      - name: Cleanup CI Snowflake schema
+        if: always()   # Run even if tests failed
+        run: |
+          python -c "
+          import snowflake.connector, os
+          conn = snowflake.connector.connect(
+              account=os.environ['SNOWFLAKE_ACCOUNT'],
+              user=os.environ['SNOWFLAKE_USER'],
+              password=os.environ['SNOWFLAKE_PASSWORD'],
+          )
+          conn.cursor().execute(
+              f\"DROP SCHEMA IF EXISTS {os.environ['SNOWFLAKE_DATABASE']}.{os.environ['SNOWFLAKE_SCHEMA']} CASCADE\"
+          )
+          print(f\"✅ Dropped CI schema: {os.environ['SNOWFLAKE_SCHEMA']}\")
+          conn.close()
+          "

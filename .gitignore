@@ -1,0 +1,19 @@
+# dbt
+dbt_project/target/
+dbt_project/dbt_packages/
+dbt_project/logs/
+dbt_project/profiles.yml   # NEVER commit credentials
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# Airflow
+airflow/logs/
+
+# OS
+.DS_Store

@@ -1,0 +1,67 @@
+name: 'saas_analytics'
+version: '1.0.0'
+config-version: 2
+
+profile: 'saas_analytics'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# ─── MODEL CONFIGURATIONS ───────────────────────────────────────────
+# Controls materialization strategy per layer
+# staging  → views  (cheap, always fresh, no storage cost)
+# intermediate → views (intermediate logic, no need to persist)
+# marts    → tables (queried by BI tools, needs speed)
+# reporting → tables (dashboard-facing, must be fast)
+
+models:
+  saas_analytics:
+    staging:
+      +materialized: view
+      +schema: staging
+      stripe:
+        +tags: ["stripe", "daily"]
+      salesforce:
+        +tags: ["salesforce", "daily"]
+      app:
+        +tags: ["app", "daily"]
+
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+      +tags: ["intermediate"]
+
+    marts:
+      +materialized: table
+      +schema: marts
+      finance:
+        +tags: ["finance", "daily"]
+      growth:
+        +tags: ["growth", "daily"]
+
+    reporting:
+      +materialized: table
+      +schema: reporting
+      +tags: ["reporting", "daily"]
+
+# ─── SEED CONFIGURATIONS ─────────────────────────────────────────────
+seeds:
+  saas_analytics:
+    +schema: raw_seeds
+    +quote_columns: false
+
+# ─── SNAPSHOT CONFIGURATIONS ─────────────────────────────────────────
+snapshots:
+  saas_analytics:
+    +target_schema: snapshots
+    +strategy: timestamp
+    +updated_at: updated_at

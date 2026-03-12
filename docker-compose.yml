@@ -1,0 +1,124 @@
+# =============================================================================
+# docker-compose.yml
+#
+# PURPOSE: Local development environment
+#   - Airflow (webserver + scheduler + worker)
+#   - PostgreSQL (Airflow metadata DB + simulated app DB)
+#   - Redis (Airflow Celery broker)
+#
+# USAGE:
+#   docker-compose up -d          → Start all services
+#   docker-compose down           → Stop all services
+#   docker-compose logs -f        → Watch logs
+#   docker-compose exec airflow-webserver bash → Shell into Airflow
+# =============================================================================
+
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.0
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__WEBSERVER__SECRET_KEY: "change-me-in-prod"
+
+    # ── Your credentials (use .env file, never hardcode in prod) ──────────
+    SNOWFLAKE_ACCOUNT:    ${SNOWFLAKE_ACCOUNT}
+    SNOWFLAKE_USER:       ${SNOWFLAKE_USER}
+    SNOWFLAKE_PASSWORD:   ${SNOWFLAKE_PASSWORD}
+    SNOWFLAKE_WAREHOUSE:  COMPUTE_WH
+    SNOWFLAKE_DATABASE:   ANALYTICS_DEV
+
+    APP_DB_HOST:          app-postgres
+    APP_DB_NAME:          appdb
+    APP_DB_USER:          appuser
+    APP_DB_PASSWORD:      apppassword
+
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./dbt_project:/opt/airflow/dbt_project
+    - ./ingestion:/opt/airflow/scripts/ingestion
+    - ~/.dbt:/home/airflow/.dbt:ro   # Mount your local dbt profiles (read-only)
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+
+  # ── Airflow Metadata DB ─────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+
+  # ── Simulated App Database (for local dev / testing) ───────────────────────
+  app-postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppassword
+      POSTGRES_DB: appdb
+    volumes:
+      - app-db-volume:/var/lib/postgresql/data
+      - ./infra/sql/seed_app_db.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    ports:
+      - "5433:5432"  # Expose on 5433 to avoid conflict with local postgres
+
+  # ── Airflow Init ───────────────────────────────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin
+    environment:
+      <<: *airflow-common-env
+
+  # ── Airflow Webserver ──────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"    # Access at http://localhost:8080 (admin/admin)
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  # ── Airflow Scheduler ──────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+volumes:
+  postgres-db-volume:
+  app-db-volume:

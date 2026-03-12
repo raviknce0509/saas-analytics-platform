@@ -1,0 +1,10 @@
+dbt-core==1.8.0
+dbt-snowflake==1.8.0
+snowflake-connector-python==3.6.0
+snowflake-sqlalchemy==1.5.3
+apache-airflow==2.9.0
+apache-airflow-providers-slack==8.5.0
+psycopg2-binary==2.9.9
+pandas==2.2.0
+sqlalchemy==2.0.25
+python-dotenv==1.0.0
