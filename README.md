@@ -19,7 +19,7 @@ A SaaS company's data was scattered across 4 systems. Finance couldn't reconcile
 ---
 
 ## Architecture
-
+![dbt Lineage Graph](docs/lineage.png)
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Data Sources                              │
